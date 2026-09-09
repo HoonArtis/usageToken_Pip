@@ -1,84 +1,37 @@
-"""Claude Session PIP — 반투명 항상-위 위젯.
+"""Claude/Codex Session PIP — 반투명 항상-위 위젯.
 
-5시간 / 주간 사용 한도 남은 %와 리셋까지 시간, 구독 갱신 D-day를 보여준다.
-데이터: usage_api.get_usage() (서버 /api/oauth/usage).
+Claude(5시간/주간)와 Codex 사용 한도의 남은 %와 리셋까지 시간을 보여준다.
+헤더의 Claude/Codex 탭 클릭 또는 우클릭 메뉴로 표시 대상을 고른다.
+데이터: usage_api.get_usage() (서버), codex_usage.get_usage() (로컬 세션 파일).
 """
+import ctypes
 import json
 import os
-import glob
-import shutil
 import threading
-import subprocess
 import tkinter as tk
 
 import usage_api
+import codex_usage
+import fairy
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
-PROJECTS_DIR = os.path.expanduser(r"~\.claude\projects")
-CREATE_NEW_CONSOLE = 0x00000010
-
-
-def find_current_session():
-    """지금 활성(=가장 최근 활동) Claude 세션을 찾는다.
-
-    반환: (session_id, cwd) 또는 None.
-    가장 최근에 수정된 트랜스크립트(.jsonl)가 현재 세션이고,
-    그 마지막 줄 JSON에서 sessionId / cwd 를 읽는다.
-    """
-    files = glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl"))
-    if not files:
-        return None
-    newest = max(files, key=os.path.getmtime)
-    sid = os.path.splitext(os.path.basename(newest))[0]
-    cwd = None
-    try:
-        last = None
-        with open(newest, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                s = line.strip()
-                if s:
-                    last = s
-        if last:
-            d = json.loads(last)
-            sid = d.get("sessionId") or d.get("session_id") or sid
-            cwd = d.get("cwd")
-    except (OSError, json.JSONDecodeError):
-        pass
-    if not cwd or not os.path.isdir(cwd):
-        cwd = os.path.expanduser("~")
-    return sid, cwd
-
-
-def open_terminal_for_session():
-    """현재 세션을 새 터미널에서 `claude --resume <id>` 로 이어서 연다."""
-    info = find_current_session()
-    if not info:
-        return
-    sid, cwd = info
-    ps_cmd = f"Set-Location -LiteralPath '{cwd}'; claude --resume {sid}"
-    wt = shutil.which("wt")
-    try:
-        if wt:
-            subprocess.Popen([wt, "-d", cwd, "powershell", "-NoExit",
-                              "-Command", ps_cmd])
-        else:
-            subprocess.Popen(["powershell", "-NoExit", "-Command", ps_cmd],
-                             creationflags=CREATE_NEW_CONSOLE)
-    except OSError:
-        pass
 
 DEFAULT_CONFIG = {
     "refresh_seconds": 600,   # 10분마다 (/usage 엔드포인트 rate-limit 회피)
     "opacity": 0.90,
     "pos": None,              # [x, y] 마지막 위치
+    "provider": "claude",     # claude | codex | both
+    "fairy": True,            # 요정 컴패니언 표시
 }
 
 # 색상
 BG = "#0d1117"
 FG = "#e6edf3"
 DIM = "#8b949e"
+FAINT = "#6e7681"
 TRACK = "#21262d"
+BORDER = "#30363d"
 SEV = {
     "normal": "#3fb950",
     "warn": "#d29922",
@@ -94,6 +47,8 @@ def load_config():
             cfg.update(json.load(f))
     except (FileNotFoundError, json.JSONDecodeError):
         pass
+    if cfg.get("provider") not in ("claude", "codex", "both"):
+        cfg["provider"] = "claude"
     return cfg
 
 
@@ -102,6 +57,23 @@ def save_config(cfg):
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
     except OSError:
+        pass
+
+
+def round_corners(win):
+    """Windows 11 DWM으로 창 모서리를 둥글게 (미지원 OS면 조용히 무시)."""
+    try:
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        if not hwnd:
+            hwnd = win.winfo_id()
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        DWMWCP_ROUND = 2
+        pref = ctypes.c_int(DWMWCP_ROUND)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+            ctypes.byref(pref), ctypes.sizeof(pref))
+    except (OSError, AttributeError):
         pass
 
 
@@ -136,6 +108,53 @@ class Bar(tk.Canvas):
             self.create_oval(x2 - d, y2 - d, x2, y2, fill=color, outline=color)
 
 
+class Slider(tk.Canvas):
+    """tk.Scale 대신 쓰는 커스텀 슬라이더 (트랙 + 원형 노브)."""
+
+    PAD = 8  # 노브가 잘리지 않게 좌우 여백
+
+    def __init__(self, master, vmin, vmax, value, command,
+                 w=160, h=20, bg=BG, fill="#3fb950"):
+        super().__init__(master, width=w, height=h, bg=bg,
+                         highlightthickness=0, bd=0)
+        self.vmin, self.vmax = vmin, vmax
+        self.command = command
+        self.w, self.h = w, h
+        self.fill = fill
+        self.value = value
+        self.bind("<Button-1>", self._on_point)
+        self.bind("<B1-Motion>", self._on_point)
+        self._draw()
+
+    def set(self, v):
+        self.value = max(self.vmin, min(self.vmax, v))
+        self._draw()
+        if self.command:
+            self.command(self.value)
+
+    def _on_point(self, e):
+        span = self.w - 2 * self.PAD
+        frac = (e.x - self.PAD) / max(1, span)
+        frac = max(0.0, min(1.0, frac))
+        self.set(self.vmin + frac * (self.vmax - self.vmin))
+
+    def _draw(self):
+        self.delete("all")
+        cy = self.h // 2
+        x1, x2 = self.PAD, self.w - self.PAD
+        frac = (self.value - self.vmin) / (self.vmax - self.vmin)
+        kx = x1 + frac * (x2 - x1)
+        # 트랙 / 채움
+        self.create_line(x1, cy, x2, cy, fill=TRACK, width=4, capstyle="round")
+        if kx > x1:
+            self.create_line(x1, cy, kx, cy, fill=self.fill, width=4,
+                             capstyle="round")
+        # 노브
+        r = 6
+        self.create_oval(kx - r, cy - r, kx + r, cy + r,
+                         fill=FG, outline=BORDER)
+
+
 class Row:
     """한 줄: 제목 + 우측 값 + 막대 + 리셋 텍스트."""
 
@@ -155,7 +174,7 @@ class Row:
                             font=("Segoe UI", 8), anchor="e")
         self.sub.pack(fill="x")
 
-    def set_block(self, block):
+    def set_block(self, block, asof=None):
         if not block:
             self.value.config(text="—", fg=DIM)
             self.bar.set(None, TRACK)
@@ -170,12 +189,20 @@ class Row:
         self.value.config(text=f"{block['remaining_pct']:.0f}% 남음", fg=color)
         self.bar.set(block["remaining_pct"], color)
         reset = block.get("reset")
-        self.sub.config(text=(f"리셋까지 {reset}" if reset else ""))
+        sub = f"리셋까지 {reset}" if reset else ""
+        if asof:
+            sub = f"{sub} · {asof} 기준" if sub else f"{asof} 기준"
+        self.sub.config(text=sub)
 
     def set_text(self, value, sub="", color=FG):
         self.value.config(text=value, fg=color)
         self.bar.set(None, TRACK)
         self.sub.config(text=sub)
+
+    def set_pending(self):
+        self.value.config(text="…", fg=DIM)
+        self.bar.set(None, TRACK)
+        self.sub.config(text="")
 
 
 class App:
@@ -188,21 +215,28 @@ class App:
         self.root.configure(bg=BG)
 
         outer = tk.Frame(self.root, bg=BG, padx=12, pady=10,
-                         highlightbackground="#30363d", highlightthickness=1)
+                         highlightbackground=BORDER, highlightthickness=1)
         outer.pack(fill="both", expand=True)
 
         header = tk.Frame(outer, bg=BG)
         header.pack(fill="x", pady=(0, 6))
-        tk.Label(header, text="Claude 세션", fg=FG, bg=BG,
-                 font=("Segoe UI Semibold", 10)).pack(side="left")
+        tabs = tk.Frame(header, bg=BG)
+        tabs.pack(side="left")
+        self.tab_labels = {}
+        for key, name in (("claude", "Claude"), ("codex", "Codex")):
+            lbl = tk.Label(tabs, text=name, bg=BG, fg=DIM,
+                           font=("Segoe UI Semibold", 10), cursor="hand2")
+            lbl.pack(side="left", padx=(0, 10))
+            lbl.bind("<Button-1>", lambda e, k=key: self._set_provider(k))
+            self.tab_labels[key] = lbl
         self.status = tk.Label(header, text="●", fg=DIM, bg=BG,
                                font=("Segoe UI", 9))
         self.status.pack(side="right")
 
-        self.row_5h = Row(outer, "5시간")
-        self.row_5h.frame.pack(fill="x", pady=3)
-        self.row_7d = Row(outer, "주간")
-        self.row_7d.frame.pack(fill="x", pady=3)
+        self.rows_frame = tk.Frame(outer, bg=BG)
+        self.rows_frame.pack(fill="x")
+        self._rows = {}          # {title: Row} (표시 순서 = _row_titles)
+        self._row_titles = []
 
         self._make_menu()
         self._bind_drag(outer)
@@ -211,12 +245,44 @@ class App:
         # 휠로 투명도 조절 (위젯 위 어디서나)
         self.root.bind_all("<MouseWheel>", self._on_wheel)
 
+        self._update_tabs()
         self._place_initial()
-        self._latest = None
-        self._last_good = None
+        round_corners(self.root)
+
+        self.fairy = fairy.Fairy(self.root)
+        if self.cfg.get("fairy"):
+            self.fairy.show()
+        self._latest = {"claude": None, "codex": None}
+        self._last_good = None    # claude 마지막 정상값 (429 대비)
         self._stop = threading.Event()
+        self._wake = threading.Event()
         threading.Thread(target=self._worker, daemon=True).start()
         self._tick_ui()
+
+    # ---- 프로바이더 선택 ----
+    def _active(self):
+        mode = self.cfg.get("provider", "claude")
+        return ("claude", "codex") if mode == "both" else (mode,)
+
+    def _set_provider(self, mode):
+        if mode == self.cfg.get("provider"):
+            return
+        self.cfg["provider"] = mode
+        save_config(self.cfg)
+        self._update_tabs()
+        self._apply()
+        self._refresh_now()
+
+    def _update_tabs(self):
+        mode = self.cfg.get("provider", "claude")
+        for key, lbl in self.tab_labels.items():
+            on = mode in (key, "both")
+            lbl.config(fg=FG if on else FAINT)
+        if hasattr(self, "seg_labels"):
+            for key, lbl in self.seg_labels.items():
+                on = mode == key
+                lbl.config(bg=BORDER if on else self.PANEL_BG,
+                           fg=FG if on else DIM)
 
     # ---- 위치/드래그 ----
     def _place_initial(self):
@@ -254,49 +320,76 @@ class App:
 
     # ---- 우클릭 메뉴 ----
     PANEL_BG = "#161b22"
+    PANEL_HOVER = "#21262d"
 
     def _make_menu(self):
-        """우클릭 시 뜨는 패널: 실시간 투명도 슬라이더 + 동작 버튼."""
+        """우클릭 패널: 표시 대상 선택 + 투명도 슬라이더 + 동작 버튼."""
         p = tk.Toplevel(self.root)
         p.withdraw()
         p.overrideredirect(True)
         p.attributes("-topmost", True)
         p.configure(bg=self.PANEL_BG)
-        inner = tk.Frame(p, bg=self.PANEL_BG, padx=10, pady=8,
-                         highlightbackground="#30363d", highlightthickness=1)
+        inner = tk.Frame(p, bg=self.PANEL_BG, padx=14, pady=12,
+                         highlightbackground=BORDER, highlightthickness=1)
         inner.pack(fill="both", expand=True)
 
-        # 투명도 슬라이더 (드래그 즉시 반영)
+        def section(text, pady=(0, 5)):
+            tk.Label(inner, text=text, fg=FAINT, bg=self.PANEL_BG,
+                     font=("Segoe UI", 8), anchor="w").pack(fill="x", pady=pady)
+
+        def divider():
+            tk.Frame(inner, bg=BORDER, height=1).pack(fill="x", pady=(10, 8))
+
+        # -- 표시 대상 (세그먼트 컨트롤) --
+        section("표시")
+        seg = tk.Frame(inner, bg=BG, highlightbackground=BORDER,
+                       highlightthickness=1)
+        seg.pack(fill="x")
+        self.seg_labels = {}
+        for key, name in (("claude", "Claude"), ("codex", "Codex"),
+                          ("both", "둘 다")):
+            lbl = tk.Label(seg, text=name, fg=DIM, bg=self.PANEL_BG,
+                           font=("Segoe UI", 9), padx=10, pady=4,
+                           cursor="hand2")
+            lbl.pack(side="left", fill="x", expand=True)
+            lbl.bind("<Button-1>", lambda e, k=key: self._set_provider(k))
+            lbl.bind("<Enter>", lambda e, k=key, w=lbl: (
+                self.cfg.get("provider") != k
+                and w.config(bg=self.PANEL_HOVER)))
+            lbl.bind("<Leave>", lambda e, k=key, w=lbl: (
+                self.cfg.get("provider") != k
+                and w.config(bg=self.PANEL_BG)))
+            self.seg_labels[key] = lbl
+
+        divider()
+
+        # -- 투명도 --
         orow = tk.Frame(inner, bg=self.PANEL_BG)
         orow.pack(fill="x")
-        tk.Label(orow, text="투명도", fg=DIM, bg=self.PANEL_BG,
-                 font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(orow, text="투명도", fg=FAINT, bg=self.PANEL_BG,
+                 font=("Segoe UI", 8)).pack(side="left")
         self.op_val = tk.Label(orow, text="", fg=FG, bg=self.PANEL_BG,
-                               font=("Segoe UI", 9), width=4, anchor="e")
+                               font=("Segoe UI", 8), anchor="e")
         self.op_val.pack(side="right")
-        self.op_slider = tk.Scale(
-            orow, from_=self.OP_MIN, to=self.OP_MAX, resolution=0.01,
-            orient="horizontal", showvalue=False, bg=self.PANEL_BG, fg=FG,
-            troughcolor=TRACK, highlightthickness=0, bd=0, length=150,
-            sliderlength=18, width=12, sliderrelief="raised",
-            activebackground=SEV["normal"], command=self._on_slider)
-        self.op_slider.pack(side="left", fill="x", expand=True, padx=6)
-        self.op_slider.set(self.cfg["opacity"])
+        self.op_slider = Slider(inner, self.OP_MIN, self.OP_MAX,
+                                self.cfg["opacity"], self._on_slider,
+                                w=170, bg=self.PANEL_BG)
+        self.op_slider.pack(fill="x", pady=(4, 0))
+        self.op_val.config(text=f"{int(round(self.cfg['opacity'] * 100))}%")
 
-        tk.Frame(inner, bg="#30363d", height=1).pack(fill="x", pady=(8, 4))
+        divider()
 
+        # -- 동작 --
         def act(label, cmd):
             b = tk.Label(inner, text=label, fg=FG, bg=self.PANEL_BG,
-                         font=("Segoe UI", 9), anchor="w", padx=6, pady=3,
+                         font=("Segoe UI", 9), anchor="w", padx=8, pady=5,
                          cursor="hand2")
             b.pack(fill="x")
             b.bind("<Button-1>", lambda e: (self._hide_panel(), cmd()))
-            b.bind("<Enter>", lambda e: b.config(bg="#21262d"))
+            b.bind("<Enter>", lambda e: b.config(bg=self.PANEL_HOVER))
             b.bind("<Leave>", lambda e: b.config(bg=self.PANEL_BG))
 
-        act("🖥  터미널 열기 (이 세션 이어서)",
-            lambda: threading.Thread(target=open_terminal_for_session,
-                                     daemon=True).start())
+        act("🧚  요정 표시/숨기기", self._toggle_fairy)
         act("↻  지금 새로고침", self._refresh_now)
         act("✕  종료", self._quit)
 
@@ -307,8 +400,10 @@ class App:
 
     def _popup(self, e):
         p = self.panel
+        self._update_tabs()   # 세그먼트 선택 상태 최신화
         p.deiconify()
         p.update_idletasks()
+        round_corners(p)
         # 커서 위치에 뜨되 화면 밖으로 나가지 않게 보정
         w, h = p.winfo_width(), p.winfo_height()
         sw, sh = p.winfo_screenwidth(), p.winfo_screenheight()
@@ -341,60 +436,123 @@ class App:
         v = max(self.OP_MIN, min(self.OP_MAX, round(self.cfg["opacity"] + step, 2)))
         self.op_slider.set(v)  # command(_on_slider) 자동 호출 → 실시간 반영
 
+    def _toggle_fairy(self):
+        self.fairy.toggle()
+        self.cfg["fairy"] = self.fairy.visible
+        save_config(self.cfg)
+
     def _quit(self):
         self._stop.set()
         self.root.destroy()
 
     # ---- 데이터 ----
     def _refresh_now(self):
-        threading.Thread(target=self._fetch_once, daemon=True).start()
-
-    def _fetch_once(self):
-        self._latest = usage_api.get_usage()
+        self._wake.set()
 
     def _worker(self):
         base = max(60, int(self.cfg.get("refresh_seconds", 180)))
         backoff = base
         while not self._stop.is_set():
-            res = usage_api.get_usage()
-            self._latest = res
-            if res.get("ok"):
-                backoff = base                       # 성공 시 백오프 리셋
-                wait = base
-            elif res.get("kind") == "ratelimit":
-                # 429: 간격을 2배씩 늘려 최대 15분까지 물러남
-                backoff = min(backoff * 2, 900)
-                wait = max(backoff, res.get("retry_after") or 0, 90)
-            else:
-                wait = base
-            self._stop.wait(wait)
+            active = self._active()
+            wait = base
+            if "claude" in active:
+                res = usage_api.get_usage()
+                self._latest["claude"] = res
+                if res.get("ok"):
+                    backoff = base                   # 성공 시 백오프 리셋
+                elif res.get("kind") == "ratelimit":
+                    # 429: 간격을 2배씩 늘려 최대 15분까지 물러남
+                    backoff = min(backoff * 2, 900)
+                    wait = max(backoff, res.get("retry_after") or 0, 90)
+            if "codex" in active:
+                self._latest["codex"] = codex_usage.get_usage()
+            self._wake.wait(wait)
+            self._wake.clear()
 
     def _tick_ui(self):
-        if self._latest is not None:
-            self._apply(self._latest)
+        self._apply()
         if not self._stop.is_set():
             self.root.after(1000, self._tick_ui)
 
-    def _apply(self, data):
+    # 상태 점 우선순위: 오류 > 경고 > 정상 > 대기
+    _DOT_RANK = {"err": 3, "warn": 2, "ok": 1, None: 0}
+
+    def _apply(self):
+        active = self._active()
+        prefix = {"claude": "Claude ", "codex": "Codex "} if len(active) > 1 \
+            else {"claude": "", "codex": ""}
+        specs, dots = [], []
+        if "claude" in active:
+            s, d = self._claude_specs(prefix["claude"])
+            specs += s
+            dots.append(d)
+        if "codex" in active:
+            s, d = self._codex_specs(prefix["codex"])
+            specs += s
+            dots.append(d)
+
+        dot = max(dots, key=lambda d: self._DOT_RANK[d])
+        self.status.config(fg={"err": SEV["critical"], "warn": SEV["warn"],
+                               "ok": SEV["normal"]}.get(dot, DIM))
+
+        self._ensure_rows([t for t, _, _ in specs])
+        for title, kind, payload in specs:
+            row = self._rows[title]
+            if kind == "block":
+                block, asof = payload
+                row.set_block(block, asof)
+            elif kind == "text":
+                row.set_text(*payload)
+            else:
+                row.set_pending()
+
+    def _claude_specs(self, prefix):
+        """반환: ([(title, kind, payload)], dot)"""
+        t5, t7 = f"{prefix}5시간", f"{prefix}주간"
+        data = self._latest["claude"]
+        if data is None:
+            return [(t5, "pending", None), (t7, "pending", None)], None
         if data.get("ok"):
             self._last_good = data
-            self.status.config(fg=SEV["normal"])
-            self.row_5h.set_block(data.get("five_hour"))
-            self.row_7d.set_block(data.get("seven_day"))
-            return
+            return [(t5, "block", (data.get("five_hour"), None)),
+                    (t7, "block", (data.get("seven_day"), None))], "ok"
         kind = data.get("kind")
         # 429(요청 과다): 마지막 정상값을 유지하고 상태 점만 노랗게
         if kind == "ratelimit" and self._last_good:
             g = self._last_good
-            self.status.config(fg=SEV["warn"])
-            self.row_5h.set_block(g.get("five_hour"))
-            self.row_7d.set_block(g.get("seven_day"))
-            return
+            return [(t5, "block", (g.get("five_hour"), None)),
+                    (t7, "block", (g.get("seven_day"), None))], "warn"
         msg = {"auth": "재인증 필요", "network": "연결 실패",
                "ratelimit": "요청 과다 — 대기 중"}.get(kind, data.get("error", "오류"))
-        self.status.config(fg=SEV["critical"])
-        self.row_5h.set_text("—", msg, DIM)
-        self.row_7d.set_text("—", "", DIM)
+        return [(t5, "text", ("—", msg, DIM)),
+                (t7, "text", ("—", "", DIM))], "err"
+
+    def _codex_specs(self, prefix):
+        """반환: ([(title, kind, payload)], dot)"""
+        data = self._latest["codex"]
+        title = "Codex"
+        if data is None:
+            return [(title, "pending", None)], None
+        if not data.get("ok"):
+            dot = "warn" if data.get("kind") == "nodata" else "err"
+            return [(title, "text", ("—", data.get("error", "오류"), DIM))], dot
+        asof = data.get("asof")
+        specs = [(f"{prefix}{w['label']}", "block", (w, asof))
+                 for w in data["windows"]]
+        return specs, "ok"
+
+    def _ensure_rows(self, titles):
+        """표시할 행 제목이 바뀌면 행들을 다시 만든다."""
+        if titles == self._row_titles:
+            return
+        for row in self._rows.values():
+            row.frame.destroy()
+        self._rows = {}
+        for t in titles:
+            row = Row(self.rows_frame, t)
+            row.frame.pack(fill="x", pady=3)
+            self._rows[t] = row
+        self._row_titles = titles
 
     def run(self):
         self.root.mainloop()
