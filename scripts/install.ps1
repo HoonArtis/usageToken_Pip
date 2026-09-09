@@ -1,11 +1,11 @@
-# Claude Session PIP - installer
+# Claude/Codex Session PIP - installer
 # Creates Desktop + Startup shortcuts and launches the widget.
 $ErrorActionPreference = "Stop"
-$dir = $PSScriptRoot
-$entry = Join-Path $dir "pip_widget.py"
+$dir = Split-Path $PSScriptRoot          # 저장소 루트 (scripts/ 상위)
+$entry = Join-Path $dir "src\pip_widget.py"
 
 if (-not (Test-Path $entry)) {
-    Write-Host "[!] pip_widget.py not found. Run this from inside the extracted folder." -ForegroundColor Red
+    Write-Host "[!] src\pip_widget.py not found. Run this from inside the extracted folder." -ForegroundColor Red
     exit 1
 }
 
@@ -26,7 +26,7 @@ function New-WidgetShortcut($lnkPath) {
     $ws = New-Object -ComObject WScript.Shell
     $s = $ws.CreateShortcut($lnkPath)
     $s.TargetPath = $pyw
-    $s.Arguments = "pip_widget.py"
+    $s.Arguments = "src\pip_widget.py"
     $s.WorkingDirectory = $dir
     $s.WindowStyle = 7
     $s.IconLocation = "$pyw,0"
@@ -45,7 +45,7 @@ Get-CimInstance Win32_Process -Filter "Name='pythonw.exe'" -ErrorAction Silently
     Where-Object { $_.CommandLine -like '*pip_widget.py*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Milliseconds 500
-Start-Process $pyw -ArgumentList "pip_widget.py" -WorkingDirectory $dir
+Start-Process $pyw -ArgumentList "src\pip_widget.py" -WorkingDirectory $dir
 Write-Host "[OK] Widget launched. Check the bottom-right of your screen." -ForegroundColor Green
 Write-Host ""
-Write-Host "Drag to move / Right-click for opacity slider, open terminal, quit." -ForegroundColor Cyan
+Write-Host "Drag to move / Right-click: provider, opacity, fairy toggle, quit." -ForegroundColor Cyan

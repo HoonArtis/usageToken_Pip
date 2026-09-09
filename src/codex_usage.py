@@ -9,7 +9,7 @@ import json
 import os
 from datetime import datetime, timezone
 
-from usage_api import _severity
+from claude_usage import _severity
 
 SESSIONS_DIR = os.path.expanduser(r"~\.codex\sessions")
 TAIL_BYTES = 2 * 1024 * 1024   # 파일 끝에서 이만큼만 읽어 스캔

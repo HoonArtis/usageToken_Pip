@@ -2,7 +2,7 @@
 
 Claude(5시간/주간)와 Codex 사용 한도의 남은 %와 리셋까지 시간을 보여준다.
 헤더의 Claude/Codex 탭 클릭 또는 우클릭 메뉴로 표시 대상을 고른다.
-데이터: usage_api.get_usage() (서버), codex_usage.get_usage() (로컬 세션 파일).
+데이터: claude_usage.get_usage() (서버), codex_usage.get_usage() (로컬 세션 파일).
 """
 import ctypes
 import json
@@ -10,12 +10,13 @@ import os
 import threading
 import tkinter as tk
 
-import usage_api
+import claude_usage
 import codex_usage
 import fairy
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "config.json")
+ROOT = os.path.dirname(HERE)                      # 저장소 루트 (src/ 상위)
+CONFIG_PATH = os.path.join(ROOT, "config.json")
 
 DEFAULT_CONFIG = {
     "refresh_seconds": 600,   # 10분마다 (/usage 엔드포인트 rate-limit 회피)
@@ -456,7 +457,7 @@ class App:
             active = self._active()
             wait = base
             if "claude" in active:
-                res = usage_api.get_usage()
+                res = claude_usage.get_usage()
                 self._latest["claude"] = res
                 if res.get("ok"):
                     backoff = base                   # 성공 시 백오프 리셋

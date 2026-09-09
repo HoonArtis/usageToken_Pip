@@ -12,7 +12,7 @@ import random
 import tkinter as tk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ASSETS = os.path.join(HERE, "assets", "fairy")
+ASSETS = os.path.join(os.path.dirname(HERE), "assets", "fairy")  # <루트>/assets/fairy
 MAGIC = "#ff00fe"   # 투명 처리용 매직 컬러
 TICK_MS = 100
 
