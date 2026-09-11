@@ -22,11 +22,17 @@ if (-not $pyw -or -not (Test-Path $pyw)) {
     exit 1
 }
 
+# 바로가기는 run-silent.vbs(숨김) -> run.bat 을 거친다:
+# 실행할 때마다 git pull로 최신 코드를 받고, 기존 인스턴스를 정리한 뒤 시작.
+# 코드가 옮겨져도 바로가기가 깨지지 않고, 로그인 자동시작 때 콘솔창도 안 뜬다.
+$launcher = Join-Path $dir "scripts\run-silent.vbs"
+$wscript = Join-Path $env:WINDIR "System32\wscript.exe"
+
 function New-WidgetShortcut($lnkPath) {
     $ws = New-Object -ComObject WScript.Shell
     $s = $ws.CreateShortcut($lnkPath)
-    $s.TargetPath = $pyw
-    $s.Arguments = "src\pip_widget.py"
+    $s.TargetPath = $wscript
+    $s.Arguments = "`"$launcher`""
     $s.WorkingDirectory = $dir
     $s.WindowStyle = 7
     $s.IconLocation = "$pyw,0"
